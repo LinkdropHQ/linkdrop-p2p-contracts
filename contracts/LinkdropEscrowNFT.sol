@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 /**
- * @title LinkdropEscrowStablecoin
+ * @title LinkdropEscrowNFT
  * @author Mikhail Dobrokhvalov <mikhail@linkdrop.io>
  * @contact https://www.linkdrop.io
  * @dev This is an implementation of the escrow contract for Linkdrop P2P. Linkdrop P2P allows a new type of token transfers, comparable to a signed blank check with a pre-defined amount. In this system, the sender does not set the destination address. Instead, they deposit tokens into the Escrow Contract, create a claim link, and share it with the recipient. The recipient can then use the claim link to redeem the escrowed tokens from the Escrow Contract. If the claim link is not redeemed before the expiration date set by the sender, the escrowed tokens are transferred back to the sender.
@@ -12,7 +12,7 @@ import "./LinkdropEscrowCommon.sol";
 
 contract LinkdropEscrowNFT is LinkdropEscrowCommon {
     string public constant name = "LinkdropEscrowNFT";
-    string public constant version = "3.1";
+    string public constant version = "3.2";
     
     //// CONSTRUCTOR ////
     constructor(
@@ -50,10 +50,14 @@ contract LinkdropEscrowNFT is LinkdropEscrowCommon {
                            uint256 tokenId_,
                            uint120 expiration_,
                            uint128 feeAmount_,
-                           bytes calldata feeAuthorization_
+                           bytes calldata feeAuthorization_,
+                           bytes calldata senderMessage_
                           ) public nonReentrant payable {
         _depositERC721(msg.sender, token_, transferId_, tokenId_, expiration_, feeAmount_, feeAuthorization_);
         IERC721(token_).safeTransferFrom(msg.sender, address(this), tokenId_);
+
+        // store sender's message onchain (encrypted)
+        _logSenderMessage(msg.sender, transferId_, senderMessage_);        
     }
 
     function _depositERC721(
@@ -117,10 +121,14 @@ contract LinkdropEscrowNFT is LinkdropEscrowCommon {
                             uint128 amount_,                            
                             uint120 expiration_,
                             uint128 feeAmount_,
-                            bytes calldata feeAuthorization_
+                            bytes calldata feeAuthorization_,
+                            bytes calldata senderMessage_
                            ) public nonReentrant payable {
         _depositERC1155(msg.sender, token_, transferId_, tokenId_, amount_, expiration_, feeAmount_, feeAuthorization_);
         IERC1155(token_).safeTransferFrom(msg.sender, address(this), tokenId_, uint256(amount_), new bytes(0));
+
+        // store sender's message onchain (encrypted)
+        _logSenderMessage(msg.sender, transferId_, senderMessage_);
     }
 
     function _depositERC1155(

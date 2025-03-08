@@ -1,6 +1,5 @@
 {
-  "name": "linkdrop-p2p-contracts",
-  "license": "GPL-3.0",
+  "name": "hardhat-project",
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^1.0.6",
     "@nomicfoundation/hardhat-network-helpers": "^1.0.9",

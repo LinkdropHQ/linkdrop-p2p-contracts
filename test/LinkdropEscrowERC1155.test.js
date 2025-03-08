@@ -20,7 +20,7 @@ async function redeemRecovered () {
   const chainId = await sender.getChainId();       
   const transferDomain = {
     name: "LinkdropEscrowNFT",
-    version: "3.1",
+    version: "3.2",
     chainId,
     verifyingContract: linkdropEscrowNFT.address, 
   }
@@ -30,8 +30,24 @@ async function redeemRecovered () {
   await linkdropEscrowNFT.connect(relayer).redeemRecovered(receiver.address, sender.address, nft.address, transferId, receiverSig, senderSig);
 }
 
+async function makeDepositERC1155 (tokenId, sponsored = true, senderMessage="0x") {
+  const {
+    depositCall,
+    transferId,
+    expiration,
+  } = await prepareDepositCall(tokenId, sponsored, senderMessage)
+
+  await depositCall()
+  
+  return {    
+    transferId,
+    tokenId,
+    expiration
+  }
+}
+
 // Function to make a deposit for an ERC1155 token
-async function makeDepositERC1155(tokenId, sponsored = true) {
+async function prepareDepositCall(tokenId, sponsored, senderMessage) {
   const feeAmount = sponsored ? 0 : depositFee;
   const expiration = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24 hours from now
   const amount = 1
@@ -50,7 +66,7 @@ async function makeDepositERC1155(tokenId, sponsored = true) {
   await nft.connect(sender).setApprovalForAll(linkdropEscrowNFT.address, true);
   
   // User deposits NFT into LinkdropEscrowNFT
-  await linkdropEscrowNFT.connect(sender).depositERC1155(
+  const depositCall = () => linkdropEscrowNFT.connect(sender).depositERC1155(
     nft.address,
     transferId,
     tokenId,
@@ -58,10 +74,12 @@ async function makeDepositERC1155(tokenId, sponsored = true) {
     expiration,
     feeAmount,
     feeAuthorization,
+    senderMessage,
     { value: feeAmount }
   );
 
   return {
+    depositCall,
     transferId,
     tokenId,
     expiration
@@ -122,6 +140,16 @@ describe("LinkdropEscrowNFT", function () {
         expect(deposit.amount).to.equal(1);            
       expect(deposit.token).to.equal(nft.address);
     });
+
+    it("Should log sender message in event", async function () {
+      const senderMessage = "0x002a5a48f0eee01056febc3398e98d70e4d05936395b0a1fce28abaa333f6712720b5acc8e1fb4b721bb8ab423db2121e12fcd7eaa41c97731fdf56a8638"
+      const { depositCall, amount, expiration, transferId } = await prepareDepositCall(1, false, message=senderMessage)
+
+      // Verify the event was emitted with the correct parameters
+      await expect(await depositCall())
+        .to.emit(linkdropEscrowNFT, "SenderMessage")
+        .withArgs(sender.address, transferId, senderMessage);
+    })
   });
 
   describe("onERC1155Received", function () {
