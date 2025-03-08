@@ -22,11 +22,11 @@ function getValidAfterAndBefore() {
   return [validAfter, validBefore];
 }
 
-async function makeDeposit (sponsored=true) {
-  // Define some values for the deposit
+async function prepareDepositCall(sponsored, senderMessage) {
+ // Define some values for the deposit
   let amount = ethers.utils.parseUnits("0.1", 18);  // 100 ETH
   const expiration = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24 hours from now
-  const fee = sponsored ? 0 : depositFee;  
+  const fee = sponsored ? 0 : depositFee;
   
   const feeAuthorization = await generateFeeAuthorization(
     relayer,
@@ -39,17 +39,35 @@ async function makeDeposit (sponsored=true) {
     tokenAddr,
     fee)
 
-  //console.log({ fee })
-  
-  // User deposits MockETH into LinkdropEscrow
-  await linkdropEscrow.connect(sender).depositETH(
+  // User deposits ETH into LinkdropEscrow
+  const depositCall = () => linkdropEscrow.connect(sender).depositETH(
     transferId,
     amount,
     expiration,
     fee,
     feeAuthorization,
+    senderMessage,
     { value: amount } 
   );
+
+  return { 
+    depositCall,
+    transferId,
+    amount,
+    expiration,
+  }
+}
+
+async function makeDeposit (sponsored=true, senderMessage="0x") {
+  const {
+    depositCall,
+    transferId,
+    amount,
+    expiration,
+  } = await prepareDepositCall(sponsored, senderMessage)
+
+  await depositCall()
+  
   return {
     transferId,
     amount,
@@ -62,7 +80,7 @@ async function redeemRecovered () {
   const chainId = await sender.getChainId();       
   const transferDomain = {
     name: "LinkdropEscrow",
-    version: "3.1",
+    version: "3.2",
     chainId, // Replace with your actual chainId
     verifyingContract: linkdropEscrow.address, // Replace with your actual contract address
   }
@@ -114,6 +132,16 @@ describe("LinkdropEscrowNetworkToken", function () {
       expect(deposit.amount).to.equal(amount.sub(depositFee));
       expect(deposit.expiration).to.equal(expiration);
       expect(deposit.token).to.equal(ethers.constants.AddressZero);
+    })
+
+    it("Should log sender message in event", async function () {
+      const senderMessage = "0x002a5a48f0eee01056febc3398e98d70e4d05936395b0a1fce28abaa333f6712720b5acc8e1fb4b721bb8ab423db2121e12fcd7eaa41c97731fdf56a8638"
+      const { depositCall, amount, expiration, transferId } = await prepareDepositCall(false, message=senderMessage)
+
+      // Verify the event was emitted with the correct parameters
+      await expect(await depositCall())
+      .to.emit(linkdropEscrow, "SenderMessage")
+      .withArgs(sender.address, transferId, senderMessage);
     })
     
     it("Should redeem ETH via original claim link ", async function () {

@@ -12,8 +12,6 @@ let usdc;
 let sender;
 let transferId;
 let linkKeyWallet;
-
-
 const APPROVE_SELECTOR = "0xe1560fd3"
 const RECEIVE_SELECTOR = "0xef55bec6"
 const depositFee = ethers.utils.parseUnits("0.1", 6);
@@ -26,7 +24,8 @@ function getValidAfterAndBefore() {
   return [validAfter, validBefore];
 }
 
-async function depositWithAuthorization (sponsored=true, selector=RECEIVE_SELECTOR) {
+
+async function prepareDepositWithAuthorizationCall (sponsored, selector, senderMessage) {
   // Define some values for the deposit
   const amount = ethers.utils.parseUnits("100", 6);  // 100 USDC
   const expiration = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24 hours from now
@@ -47,14 +46,31 @@ async function depositWithAuthorization (sponsored=true, selector=RECEIVE_SELECT
   const authorization = await getAuthorization(sender, linkdropEscrow.address, amount, validAfter, validBefore, transferId, expiration, domain, fee)
 
   // User deposits MockUSDC into LinkdropEscrow
-  await linkdropEscrow.connect(relayer).depositWithAuthorization(
+  const depositWithAuthorizationCall = () => linkdropEscrow.connect(relayer).depositWithAuthorization(
     usdc.address,
     transferId,
     expiration,
     selector,    
     fee,
-    authorization
+    authorization,
+    senderMessage
   );
+  return {
+    depositWithAuthorizationCall,
+    transferId,
+    amount,
+    expiration,
+  }
+}
+
+async function depositWithAuthorization (sponsored=true, selector=RECEIVE_SELECTOR, senderMessage="0x") {
+  const {
+    depositWithAuthorizationCall,
+    transferId,
+    amount,
+    expiration,
+  } = await prepareDepositWithAuthorizationCall(sponsored, selector, senderMessage)
+  await depositWithAuthorizationCall()  
   return {
     transferId,
     amount,
@@ -62,7 +78,7 @@ async function depositWithAuthorization (sponsored=true, selector=RECEIVE_SELECT
   }
 }
 
-async function makeDeposit (sponsored=true) {
+async function makeDeposit (sponsored=true, senderMessage="0x") {
   // Define some values for the deposit
   const amount = ethers.utils.parseUnits("100", 6);  // 100 USDC
   const expiration = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24 hours from now
@@ -89,7 +105,8 @@ async function makeDeposit (sponsored=true) {
     expiration,
     usdc.address,
     fee,
-    feeAuthorization
+    feeAuthorization,
+    senderMessage
   );
   return {
     transferId,
@@ -104,7 +121,7 @@ async function redeemRecovered () {
   const chainId = await sender.getChainId();       
   const transferDomain = {
     name: "LinkdropEscrow",
-    version: "3.1",
+    version: "3.2",
     chainId, // Replace with your actual chainId
     verifyingContract: linkdropEscrow.address, // Replace with your actual contract address
   }
@@ -144,7 +161,7 @@ describe("LinkdropEscrowStablecoin", function () {
       const expiration = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24 hours from now
       
       await expect(
-        linkdropEscrow.connect(addrs[0]).depositWithAuthorization(usdc.address, transferId, expiration, RECEIVE_SELECTOR, 0, receiveAuthorization)
+        linkdropEscrow.connect(addrs[0]).depositWithAuthorization(usdc.address, transferId, expiration, RECEIVE_SELECTOR, 0, receiveAuthorization, "0x")
       ).to.be.revertedWith("LinkdropEscrow: msg.sender is not relayer.");
     });
 
@@ -156,8 +173,8 @@ describe("LinkdropEscrowStablecoin", function () {
       const receiveAuthorization = ethers.utils.defaultAbiCoder.encode(["address", "address", "uint256", "uint256", "uint256", "uint256"], [from, to, amount, amount, amount, amount]);
 
       await expect(
-        linkdropEscrow.connect(relayer).depositWithAuthorization(usdc.address, transferId, expiration, RECEIVE_SELECTOR, 0, receiveAuthorization)
-      ).to.be.revertedWith("LinkdropEscrow: receiveAuthorization_ decode fail. Recipient is not this contract.");
+        linkdropEscrow.connect(relayer).depositWithAuthorization(usdc.address, transferId, expiration, RECEIVE_SELECTOR, 0, receiveAuthorization, "0x")
+      ).to.be.revertedWith("LinkdropEscrow: Invalid recipient");
     });
 
     it("Should fail if expiration is invalid", async function () {
@@ -180,7 +197,7 @@ describe("LinkdropEscrowStablecoin", function () {
       const authorization = await getAuthorization(sender, linkdropEscrow.address, amount, validAfter, validBefore, transferId, expiration, domain, 0)
 
       await expect(
-        linkdropEscrow.connect(relayer).depositWithAuthorization(usdc.address, transferId, expiration, RECEIVE_SELECTOR, 0, authorization)
+        linkdropEscrow.connect(relayer).depositWithAuthorization(usdc.address, transferId, expiration, RECEIVE_SELECTOR, 0, authorization, "0x")
       )
         .to.be.revertedWith("LinkdropEscrow: depositing with invalid expiration.");
     });
@@ -221,7 +238,17 @@ describe("LinkdropEscrowStablecoin", function () {
       expect(deposit.amount).to.equal(amount);
       expect(deposit.expiration).to.equal(expiration);
       expect(deposit.token).to.equal(usdc.address);
-    })        
+    })
+
+    it("Should log sender message in event", async function () {
+      const senderMessage = "0x002a5a48f0eee01056febc3398e98d70e4d05936395b0a1fce28abaa333f6712720b5acc8e1fb4b721bb8ab423db2121e12fcd7eaa41c97731fdf56a8638"
+      const { depositWithAuthorizationCall, amount, expiration, transferId } = await prepareDepositWithAuthorizationCall(false, RECEIVE_SELECTOR, message=senderMessage)
+
+      // Verify the event was emitted with the correct parameters
+      await expect(await depositWithAuthorizationCall())
+      .to.emit(linkdropEscrow, "SenderMessage")
+      .withArgs(sender.address, transferId, senderMessage);
+    })
   })
 
   describe("withdraw fees", function () {

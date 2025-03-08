@@ -1,4 +1,5 @@
-// SPADX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: GPL-3.0
+pragma solidity ^0.8.17;
 import "openzeppelin-solidity/contracts/access/Ownable.sol";
 import "openzeppelin-solidity/contracts/utils/cryptography/ECDSA.sol";
 import "openzeppelin-solidity/contracts/token/ERC20/IERC20.sol";
@@ -57,6 +58,9 @@ abstract contract LinkdropEscrowCommon is EIP712, Ownable, ReentrancyGuard {
                      uint128 claimFee,
                      uint128 depositFee
     );
+
+
+    event SenderMessage(address indexed sender, address indexed transferId, bytes senderMessage);
     
     struct DepositData {
         uint256 tokenId;        
@@ -86,6 +90,13 @@ abstract contract LinkdropEscrowCommon is EIP712, Ownable, ReentrancyGuard {
         _;
     }
 
+
+    // log optional encrypted message
+    function _logSenderMessage(address sender_, address transferId_, bytes calldata senderMessage_) internal {
+        if (senderMessage_.length > 0) { // only log if message was passed
+            emit SenderMessage(sender_, transferId_, senderMessage_);
+        }
+    }    
 
     function getDeposit(
                         address token_,
@@ -135,7 +146,7 @@ abstract contract LinkdropEscrowCommon is EIP712, Ownable, ReentrancyGuard {
     
     function recoverLinkKeyId(
                               address receiver_,
-                              bytes calldata receiverSig_) private view returns (address linkKeyId) {
+                              bytes calldata receiverSig_) private pure returns (address linkKeyId) {
         bytes32 prefixedHash_ = ECDSA.toEthSignedMessageHash(keccak256(abi.encodePacked(receiver_)));
         return ECDSA.recover(prefixedHash_, receiverSig_);    
     }

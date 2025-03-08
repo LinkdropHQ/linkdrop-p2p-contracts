@@ -12,9 +12,12 @@ import "openzeppelin-solidity/contracts/utils/cryptography/ECDSA.sol";
 import "./LinkdropEscrowCommon.sol";
 import "./libraries/TransferHelper.sol";
 
+error ERC6492DeployFailed(bytes error);
+
 contract LinkdropEscrow is LinkdropEscrowCommon {
     string public constant name = "LinkdropEscrow";
-    string public constant version = "3.1";
+    string public constant version = "3.2";
+    bytes32 private constant ERC6492_DETECTION_SUFFIX = 0x6492649264926492649264926492649264926492649264926492649264926492;
     
     //// CONSTRUCTOR ////
     constructor(
@@ -22,7 +25,6 @@ contract LinkdropEscrow is LinkdropEscrowCommon {
     ) EIP712(name, version) {
         relayers[relayer_] = true;
     }
-
     
     //// PUBLIC FUNCTIONS ////
     function deposit(address token_,
@@ -31,8 +33,11 @@ contract LinkdropEscrow is LinkdropEscrowCommon {
                      uint120 expiration_,
                      address feeToken_,
                      uint128 feeAmount_,
-                     bytes calldata feeAuthorization_
-    ) public nonReentrant payable {
+                     bytes calldata feeAuthorization_,
+                     bytes calldata senderMessage_
+                    ) public
+        nonReentrant
+        payable {
         bool feesAuthorized_ = verifyFeeAuthorization(
                                                       msg.sender,
                                                       token_,
@@ -48,13 +53,16 @@ contract LinkdropEscrow is LinkdropEscrowCommon {
         
         TransferHelper.safeTransferFrom(token_, msg.sender, address(this), uint256(amount_));
 
+        // store sender's message onchain (encrypted)
+        _logSenderMessage(msg.sender, transferId_, senderMessage_);
+        
          // stablecoins have fees in the same token
         if (feeToken_ == token_) {
-            return _depositStablecoins(msg.sender, token_, transferId_, amount_, expiration_, feeToken_, uint128(feeAmount_));
+            return _depositStablecoins(msg.sender, token_, transferId_, amount_, expiration_, uint128(feeAmount_));
         }
         
         // all other ERC20 tokens have fees in native tokens
-        return _depositERC20(msg.sender, token_, transferId_, amount_, expiration_, feeToken_, uint128(feeAmount_));               
+        return _depositERC20(msg.sender, token_, transferId_, amount_, expiration_, feeToken_, uint128(feeAmount_));
     }
     
     
@@ -66,8 +74,11 @@ contract LinkdropEscrow is LinkdropEscrowCommon {
                      uint128 amount_,
                      uint120 expiration_,
                      uint128 feeAmount_,
-                     bytes calldata feeAuthorization_
-    ) public nonReentrant payable {
+                     bytes calldata feeAuthorization_,
+                     bytes calldata senderMessage_
+    ) public
+        nonReentrant
+        payable {
         bool feesAuthorized_ = verifyFeeAuthorization(
                                                       msg.sender,
                                                       address(0), // token is 0x000..000 for ETH
@@ -95,86 +106,87 @@ contract LinkdropEscrow is LinkdropEscrowCommon {
                      expiration_,
                      0, // tokentype is 0 for ETH
                      address(0), // token is 0x000..000 for ETH
-                     feeAmount_); 
-    }
+                     feeAmount_);
 
+        // store sender's message onchain (encrypted)
+        _logSenderMessage(msg.sender, transferId_, senderMessage_);        
+    }
   
     //// ONLY RELAYER ////
     function depositWithAuthorization(
                                       address token_,
                                       address transferId_,
                                       uint120 expiration_,
-                                      bytes4 authorizationSelector_,                                                                 
+                                      bytes4 authSelector_,
                                       uint128 fee_,
-                                      bytes calldata receiveAuthorization_
-    ) public onlyRelayer {
+                                      bytes calldata receiveAuthorization_,
+                                      bytes calldata senderMessage_
+    ) public
+        onlyRelayer
+    {
+        // Validate authorization selector
+        require(
+                authSelector_ == 0xe1560fd3 || authSelector_ == 0xef55bec6 || authSelector_ == 0x88b7ab63,
+                "LinkdropEscrow: invalid selector"
+        );
 
-        // native USDC supports receiveWithAuthorization and bridged USDC.e supports approveWithAuthorization instead. Selector should be one of the following depending on the token contract:
-        // 0xe1560fd3 - approveWithAuthorization selector
-        // 0xef55bec6 - recieveWithAuthorization selector
-        require(authorizationSelector_ == 0xe1560fd3 || authorizationSelector_ == 0xef55bec6, "LinkdropEscrow: invalid selector");    
-      
-        address from_;
-        address to_;
-        uint256 amount_;
 
-        {
-            // Retrieving deposit information from receiveAuthorization_
-            uint256 validAfter_;
-            uint256 validBefore_;
-            bytes32 nonce;
-    
-            (from_,
-             to_,
-             amount_,
-             validAfter_,
-             validBefore_,       
-             nonce) = abi.decode(
-                                 receiveAuthorization_[0:192], (
-                                                                address,
-                                                                address,
-                                                                uint256,
-                                                                uint256,
-                                                                uint256,
-                                                                bytes32
-                                 ));
-
-            require(to_ == address(this), "LinkdropEscrow: receiveAuthorization_ decode fail. Recipient is not this contract.");
-            require(keccak256(abi.encodePacked(from_, transferId_, amount_, expiration_, fee_)) == nonce, "LinkdropEscrow: receiveAuthorization_ decode fail. Invalid nonce.");
-
-            (bool success, ) = token_.call(
-                                           abi.encodePacked(
-                                                            authorizationSelector_,
-                                                            receiveAuthorization_
-                                           )
-            );
-            require(success, "LinkdropEscrow: approve failed.");
-        }
-
-        // if approveWithAuthorization (for bridged USDC.e)
-        // transfer tokens from sender to the escrow contract
-        if (authorizationSelector_ == 0xe1560fd3) { 
-            TransferHelper.safeTransferFrom(token_, from_, address(this), uint256(amount_));
-        } // if receiveWithAuthorization (for native USDC) nothing is needed to be done
-    
-        _depositStablecoins(from_, token_, transferId_, uint128(amount_), expiration_, token_, fee_);
+        // Decode authorization and retrieve details
+        (address from_, uint256 amount_) = _processAuthorization(token_, transferId_, authSelector_, receiveAuthorization_, expiration_, fee_);
+        
+        // Perform deposit logic
+        _depositStablecoins(from_, token_, transferId_, uint128(amount_), expiration_, fee_);
+        
+        // Log the optional sender message
+        _logSenderMessage(from_, transferId_, senderMessage_);
     }
-
     
-    //// INTERNAL FUNCTIONS ////
-  
+    function _processAuthorization(
+                                   address token_,
+                                   address transferId_,
+                                   bytes4 authSelector_,
+                                   bytes calldata receiveAuthorization_,
+                                   uint120 expiration_,
+                                   uint128 fee_
+    ) private returns (address from_, uint256 amount_) {
+        address to_;
+        uint256 validAfter_;
+        uint256 validBefore_;
+        bytes32 nonce;
+
+        (from_, to_, amount_, validAfter_, validBefore_, nonce) = abi.decode(
+            receiveAuthorization_[0:192],
+            (address, address, uint256, uint256, uint256, bytes32)
+        );
+
+        require(to_ == address(this), "LinkdropEscrow: Invalid recipient");
+        require(
+            keccak256(abi.encodePacked(from_, transferId_, amount_, expiration_, fee_)) == nonce,
+            "LinkdropEscrow: Invalid nonce"
+        );
+
+        (bool success, ) = token_.call(abi.encodePacked(authSelector_, receiveAuthorization_));
+        require(success, "LinkdropEscrow: approve failed");
+
+        // Transfer tokens if using approveWithAuthorization        
+        if (authSelector_ == 0xe1560fd3) {
+            TransferHelper.safeTransferFrom(token_, from_, address(this), amount_);
+        }
+        
+        return (from_, amount_);
+    }
+    
+    //// INTERNAL FUNCTIONS //// 
     function _depositStablecoins(
                                  address sender_,
                                  address token_,
                                  address transferId_,
                                  uint128 amount_,
                                  uint120 expiration_,
-                                 address feeToken_,
                                  uint128 feeAmount_
     ) private {
         require(deposits[sender_][token_][transferId_].amount == 0, "LinkdropEscrow: transferId is in use.");
         require(expiration_ > block.timestamp, "LinkdropEscrow: depositing with invalid expiration.");
-        require(feeToken_ == token_, "LinkdropEscrow: Fees for transfers in stablecoins should be paid in the stablecoin token.");
         require(token_ != address(0), "LinkdropEscrow: token should not be address(0)");
         require(amount_ > feeAmount_, "LinkdropEscrow: amount does not cover fee.");
         require(msg.value == 0, "LinkdropEscrow: fees should be paid in token not ether");
@@ -188,7 +200,7 @@ contract LinkdropEscrow is LinkdropEscrowCommon {
                      amount_,
                      expiration_,
                      1, // tokenType is 1 for ERC20
-                     feeToken_,
+                     token_,
                      feeAmount_);
     }
 

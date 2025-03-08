@@ -13,7 +13,6 @@ let sender;
 let transferId;
 let linkKeyWallet;
 
-
 const depositFee = ethers.utils.parseUnits("0.1", 18);
 const feeToken = ethers.constants.AddressZero
 
@@ -25,8 +24,8 @@ function getValidAfterAndBefore() {
   return [validAfter, validBefore];
 }
 
-async function makeDeposit (sponsored=true) {
-  // Define some values for the deposit
+async function prepareDepositCall(sponsored=true, senderMessage="0x") {
+ // Define some values for the deposit
   const amount = ethers.utils.parseUnits("100", 6);  // 100 TOKEN
   const expiration = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24 hours from now
   const fee = sponsored ? 0 : depositFee;
@@ -43,9 +42,8 @@ async function makeDeposit (sponsored=true) {
     fee)
   
   await token.connect(sender).approve(linkdropEscrow.address, amount);
-  
-  // User deposits MockTOKEN into LinkdropEscrow
-  await linkdropEscrow.connect(sender).deposit(
+    // User deposits MockTOKEN into LinkdropEscrow
+  const depositCall = () => linkdropEscrow.connect(sender).deposit(
     token.address,
     transferId,
     amount,
@@ -53,8 +51,27 @@ async function makeDeposit (sponsored=true) {
     feeToken,
     fee,
     feeAuthorization,
+    senderMessage,
     { value: fee }
   );
+  return { 
+    depositCall,
+    transferId,
+    amount,
+    expiration,
+  }
+}
+
+async function makeDeposit (sponsored=true, senderMessage="0x") {
+  const {
+    depositCall,
+    transferId,
+    amount,
+    expiration,
+  } = await prepareDepositCall(sponsored, senderMessage)
+
+  await depositCall()
+  
   return {
     transferId,
     amount,
@@ -62,13 +79,12 @@ async function makeDeposit (sponsored=true) {
   }
 }
 
-
 async function redeemRecovered () {
   // User redeems MockTOKEN from LinkdropEscrow
   const chainId = await sender.getChainId();       
   const transferDomain = {
     name: "LinkdropEscrow",
-    version: "3.1",
+    version: "3.2",
     chainId, 
     verifyingContract: linkdropEscrow.address, 
   }
@@ -86,9 +102,7 @@ describe("LinkdropEscrowERC20", function () {
     token = await Token.deploy();
 
     await token.transfer(sender.address, ethers.utils.parseUnits("10000", 6));
-
     transferId = linkKeyWallet.address;
-
     
     LinkdropEscrow = await ethers.getContractFactory("LinkdropEscrow");
     linkdropEscrow = await LinkdropEscrow.deploy(relayer.address);    
@@ -118,6 +132,16 @@ describe("LinkdropEscrowERC20", function () {
       expect(deposit.token).to.equal(token.address);
     })
     
+    it("Should log sender message in event", async function () {
+      const senderMessage = "0x002a5a48f0eee01056febc3398e98d70e4d05936395b0a1fce28abaa333f6712720b5acc8e1fb4b721bb8ab423db2121e12fcd7eaa41c97731fdf56a8638"
+      const { depositCall, amount, expiration, transferId } = await prepareDepositCall(false, message=senderMessage)
+
+      // Verify the event was emitted with the correct parameters
+      await expect(await depositCall())
+      .to.emit(linkdropEscrow, "SenderMessage")
+      .withArgs(sender.address, transferId, senderMessage);
+    })
+
     
     it("Should deposit token directly (sponsored)", async function () {
       const { amount, expiration, transferId } = await makeDeposit(true)      
