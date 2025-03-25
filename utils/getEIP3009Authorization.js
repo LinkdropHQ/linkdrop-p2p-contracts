@@ -2,10 +2,10 @@
 const { ethers: { utils } } = require('hardhat');
 
 // Generate a random string and convert it to bytes32
-function getNonce(from, transferId, amount, expiration, fee) {
+function getNonce(from, transferId, amount, expiration) {
   return ethers.utils.solidityKeccak256(
-    ['address', 'address', 'uint256', 'uint120', 'uint128'],
-    [from, transferId, amount, expiration, fee ]
+    ['address', 'address', 'uint256', 'uint128'],
+    [from, transferId, amount, expiration ]
   )
 }
 
@@ -16,7 +16,7 @@ function getNonce(from, transferId, amount, expiration, fee) {
 //     chainId: 1, // Replace with the chain ID of the network you are on
 //     verifyingContract: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // Replace with the USDC contract address
 // };
-async function getAuthorization(user, to, amount, validAfter, validBefore, transferId, expiration, domain, fee) {
+async function getAuthorization(user, to, amount, validAfter, validBefore, transferId, expiration, domain) {
     // The EIP-712 type data
     const types = {
         ApproveWithAuthorization: [
@@ -29,7 +29,7 @@ async function getAuthorization(user, to, amount, validAfter, validBefore, trans
         ],
     };
   amount = amount.toString()
-  const nonce = getNonce(user.address, transferId, amount, expiration, fee.toString())
+  const nonce = getNonce(user.address, transferId, amount, expiration)
   const message = {
     owner: user.address,
     spender: to,

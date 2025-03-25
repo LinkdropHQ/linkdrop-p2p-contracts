@@ -31,36 +31,7 @@ async function generateReceiverSig(linkKeyWallet, receiver) {
 }
 
 
-async function generateFeeAuthorization(relayer,
-                                        sender, 
-                                        token,
-                                        transferId,
-                                        tokenId,
-                                        amount,
-                                        expiration,
-                                        feeToken,
-                                        feeAmount) {
-  const messageHash = ethers.utils.solidityKeccak256(
-    ['address', 'address', 'address', 'uint256', 'uint128', 'uint120', 'address', 'uint128'],
-    [
-      sender,
-      token,      
-      transferId,
-      tokenId,
-      amount,
-      expiration,
-      feeToken,
-      feeAmount
-    ]
-  )
-  const messageHashToSign = ethers.utils.arrayify(messageHash)
-  const signature = await relayer.signMessage(messageHashToSign)
-  return signature
-}
-
-
 module.exports = {
   generateLinkKeyandSignature,
-  generateReceiverSig,
-  generateFeeAuthorization
+  generateReceiverSig
 }

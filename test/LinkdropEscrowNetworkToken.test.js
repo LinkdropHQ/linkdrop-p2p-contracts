@@ -1,72 +1,39 @@
 const { expect } = require("chai");
 const hre = require("hardhat");
 const getAuthorization = require("../utils/getEIP3009Authorization")
-const { generateLinkKeyandSignature, generateReceiverSig, generateFeeAuthorization } = require("../utils/escrowSigUtils");
+const { generateLinkKeyandSignature, generateReceiverSig } = require("../utils/escrowSigUtils");
 
 let owner;
 let feeReceiver;
 let relayer;
 let LinkdropEscrow;
 let linkdropEscrow;
+let usdc;
 let sender;
+let claimFee;
+let depositFee;
 let transferId;
 let linkKeyWallet;
-let tokenAddr = ethers.constants.AddressZero
-const depositFee = ethers.utils.parseUnits("0.001", 18);
 
 // Generate validAfter and validBefore timestamps
 function getValidAfterAndBefore() {
-  const now = Math.floor(Date.now() / 1000);
-  const validAfter = now - 60; // valid 1 minute ago
-  const validBefore = now + 60 * 60; // valid for the next 1 hour
-  return [validAfter, validBefore];
+    const now = Math.floor(Date.now() / 1000);
+    const validAfter = now - 60; // valid 1 minute ago
+    const validBefore = now + 60 * 60; // valid for the next 1 hour
+    return [validAfter, validBefore];
 }
 
-async function prepareDepositCall(sponsored, senderMessage) {
- // Define some values for the deposit
-  let amount = ethers.utils.parseUnits("0.1", 18);  // 100 ETH
+async function makeDeposit () {
+  // Define some values for the deposit
+  const amount = ethers.utils.parseUnits("0.2", 18);  // 10 eth
   const expiration = Math.floor(Date.now() / 1000) + 60 * 60 * 24; // 24 hours from now
-  const fee = sponsored ? 0 : depositFee;
   
-  const feeAuthorization = await generateFeeAuthorization(
-    relayer,
-    sender.address,
-    tokenAddr,
-    transferId,
-    0, // tokenId
-    amount,
-    expiration,
-    tokenAddr,
-    fee)
-
-  // User deposits ETH into LinkdropEscrow
-  const depositCall = () => linkdropEscrow.connect(sender).depositETH(
-    transferId,
-    amount,
-    expiration,
-    fee,
-    feeAuthorization,
-    senderMessage,
-    { value: amount } 
-  );
-
-  return { 
-    depositCall,
-    transferId,
-    amount,
-    expiration,
-  }
-}
-
-async function makeDeposit (sponsored=true, senderMessage="0x") {
-  const {
-    depositCall,
-    transferId,
-    amount,
-    expiration,
-  } = await prepareDepositCall(sponsored, senderMessage)
-
-  await depositCall()
+  await sender.sendTransaction({
+    to: linkdropEscrow.address,
+    value: amount,
+    gasLimit: 1000000, // Ensure you have enough gas
+    data: linkdropEscrow.interface.encodeFunctionData("deposit", [transferId, expiration])
+  });
   
   return {
     transferId,
@@ -75,29 +42,32 @@ async function makeDeposit (sponsored=true, senderMessage="0x") {
   }
 }
 
-async function redeemRecovered () {
-  // User redeems MockETH from LinkdropEscrow
-  const chainId = await sender.getChainId();       
-  const transferDomain = {
-    name: "LinkdropEscrow",
-    version: "3.2",
-    chainId, // Replace with your actual chainId
-    verifyingContract: linkdropEscrow.address, // Replace with your actual contract address
-  }
-  let { linkKey: newLinkKey, newLinkKeyId, senderSig } = await generateLinkKeyandSignature(sender, transferId, transferDomain)
-  const newLinkKeyWallet = new ethers.Wallet(newLinkKey)
-  const receiverSig = await generateReceiverSig(newLinkKeyWallet, receiver.address)
-  await linkdropEscrow.connect(relayer).redeemRecovered(receiver.address, sender.address, tokenAddr, transferId, receiverSig, senderSig);
+async function redeemRecovered (sponsored=true) {
+      // User redeems MockUSDC from LinkdropEscrow
+      const chainId = await sender.getChainId();       
+      const transferDomain = {
+        name: "LinkdropEscrow",
+        version: "2",
+        chainId, // Replace with your actual chainId
+        verifyingContract: linkdropEscrow.address, // Replace with your actual contract address
+      }
+      let { linkKey: newLinkKey, newLinkKeyId, senderSig } = await generateLinkKeyandSignature(sender, transferId, transferDomain)
+      const newLinkKeyWallet = new ethers.Wallet(newLinkKey)
+      const receiverSig = await generateReceiverSig(newLinkKeyWallet, receiver.address)
+      await linkdropEscrow.connect(relayer).redeemRecovered(receiver.address, transferId, receiverSig, senderSig, sponsored);
 }
 
 describe("LinkdropEscrowNetworkToken", function () {
   beforeEach(async function () {
     [owner,feeReceiver, relayer, sender, linkKeyWallet, ...addrs] = await ethers.getSigners();
+
     receiver = ethers.Wallet.createRandom()
+    claimFee = ethers.utils.parseUnits("0.05", 18)
+    depositFee = ethers.utils.parseUnits("0.05", 18)    
     transferId = linkKeyWallet.address;
     
-    LinkdropEscrow = await ethers.getContractFactory("LinkdropEscrow");
-    linkdropEscrow = await LinkdropEscrow.deploy(relayer.address);    
+    LinkdropEscrow = await ethers.getContractFactory("LinkdropEscrowNetworkToken");
+    linkdropEscrow = await LinkdropEscrow.deploy(relayer.address, claimFee);    
     await linkdropEscrow.deployed();
   });
 
@@ -105,102 +75,119 @@ describe("LinkdropEscrowNetworkToken", function () {
     it("Should have correct owner", async function () {
       await expect(await linkdropEscrow.owner()).to.be.equal(owner.address)
     })
+    it("Should have correct token", async function () {
+      await expect(await linkdropEscrow.token()).to.be.equal(ethers.constants.AddressZero)
+    })    
   })
   
-  describe("deposit", function () {    
-    it("Should deposit ETH (sponsored)", async function () {
+  describe("deposit", function () {
+    it("Should fail if expiration is invalid", async function () {
+      const amount = ethers.utils.parseUnits("1", 18);  // 10 eth
+      const expiration = Math.floor(Date.now() / 1000) - 60 * 60 * 24; // 24 hours from now
+      
+      await expect(sender.sendTransaction({
+        to: linkdropEscrow.address,
+        value: amount,
+        gasLimit: 1000000, // Ensure you have enough gas
+        data: linkdropEscrow.interface.encodeFunctionData("deposit", [transferId, expiration])
+      })).to.be.revertedWith("LinkdropEscrow: depositing with invalid expiration.");
+    });
+    
+    it("Should deposit ETH", async function () {
       const { amount, expiration, transferId } = await makeDeposit()
       
-      // Check that the ETH was transferred
+      // Check that the USDC was transferred
       expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(amount);
-      expect(await linkdropEscrow.accruedFees(tokenAddr)).to.equal(0);
+      expect(await linkdropEscrow.accruedFees()).to.equal(0);
 
-      const deposit = await linkdropEscrow.getDeposit(tokenAddr, sender.address, transferId)
+      const deposit = await linkdropEscrow.getDeposit(sender.address, transferId)
       expect(deposit.amount).to.equal(amount);
       expect(deposit.expiration).to.equal(expiration);
-      expect(deposit.token).to.equal(ethers.constants.AddressZero);      
+      expect(deposit.tokenAddress).to.equal(ethers.constants.AddressZero);      
     })
+        
     
-    it("Should deposit ETH (not sponsored)", async function () {
-      const { amount, expiration, transferId } = await makeDeposit(false)
-      
-      // Check that the ETH was transferred
-      expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(amount);
-      expect(await linkdropEscrow.accruedFees(tokenAddr)).to.equal(depositFee);
-
-      const deposit = await linkdropEscrow.getDeposit(tokenAddr, sender.address, transferId)
-      expect(deposit.amount).to.equal(amount.sub(depositFee));
-      expect(deposit.expiration).to.equal(expiration);
-      expect(deposit.token).to.equal(ethers.constants.AddressZero);
-    })
-
-    it("Should log sender message in event", async function () {
-      const senderMessage = "0x002a5a48f0eee01056febc3398e98d70e4d05936395b0a1fce28abaa333f6712720b5acc8e1fb4b721bb8ab423db2121e12fcd7eaa41c97731fdf56a8638"
-      const { depositCall, amount, expiration, transferId } = await prepareDepositCall(false, message=senderMessage)
-
-      // Verify the event was emitted with the correct parameters
-      await expect(await depositCall())
-      .to.emit(linkdropEscrow, "SenderMessage")
-      .withArgs(sender.address, transferId, senderMessage);
-    })
-    
-    it("Should redeem ETH via original claim link ", async function () {
+    it("Should redeem ETH via original claim link (sponsored)", async function () {
       const { amount, expiration, transferId } = await makeDeposit()
       const receiverSig = await generateReceiverSig(linkKeyWallet, receiver.address)
-      await linkdropEscrow.connect(relayer).redeem(receiver.address, sender.address, tokenAddr, receiverSig);
+      await linkdropEscrow.connect(relayer).redeem(receiver.address, sender.address, receiverSig, true);
 
-      // Check that the ETH was redeemed
+      // Check that the USDC was redeemed
       expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(0);
       expect(await ethers.provider.getBalance(receiver.address)).to.equal(amount);
-      expect((await linkdropEscrow.getDeposit(tokenAddr, sender.address, transferId)).amount).to.equal(0);
-      expect(await linkdropEscrow.accruedFees(tokenAddr)).to.equal(0);     
+      expect((await linkdropEscrow.getDeposit(sender.address, transferId)).amount).to.equal(0);
+      expect(await linkdropEscrow.accruedFees()).to.equal(0);     
     })
 
-    it("Should redeem ETH via recovered link ", async function () {
+    it("Should redeem ETH via recovered link (sponsored)", async function () {
       const { amount, expiration, transferId } = await makeDeposit()
       expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(amount);
       
       // REDEEM 
       await redeemRecovered(true)
       
-      // Check that the ETH was redeemed
+      // Check that the USDC was redeemed
       expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(0);
       expect(await ethers.provider.getBalance(receiver.address)).to.equal(amount);
-      expect((await linkdropEscrow.getDeposit(tokenAddr, sender.address, transferId)).amount).to.equal(0);
-      expect(await linkdropEscrow.accruedFees(tokenAddr)).to.equal(0);       
+      expect((await linkdropEscrow.getDeposit(sender.address, transferId)).amount).to.equal(0);
+      expect(await linkdropEscrow.accruedFees()).to.equal(0);       
+    })
+
+    it("Should redeem ETH via original claim link (non-sponsored)", async function () {
+      const { amount, expiration, transferId } = await makeDeposit()
+      const receiverSig = await generateReceiverSig(linkKeyWallet, receiver.address)
+      await linkdropEscrow.connect(relayer).redeem(receiver.address, sender.address, receiverSig, false);
+
+      // Check that the USDC was redeemed
+      expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(claimFee);
+      expect(await ethers.provider.getBalance(receiver.address)).to.equal(amount.sub(claimFee));
+      expect((await linkdropEscrow.getDeposit(sender.address, transferId)).amount).to.equal(0);
+      expect(await linkdropEscrow.accruedFees()).to.equal(claimFee);     
+    })
+
+    it("Should redeem ETH via recovered link (non-sponsored)", async function () {
+      const { amount, expiration, transferId } = await makeDeposit()
+      expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(amount);
+      
+      // REDEEM 
+      await redeemRecovered(false)
+      
+      // Check that the USDC was redeemed
+      expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(claimFee);
+      expect(await ethers.provider.getBalance(receiver.address)).to.equal(amount.sub(claimFee));
+      expect((await linkdropEscrow.getDeposit(sender.address, transferId)).amount).to.equal(0);
+      expect(await linkdropEscrow.accruedFees()).to.equal(claimFee);
+    })
+
+    it("Should withdraw accrued fees", async function () {
+      const { amount, expiration, transferId } = await makeDeposit()
+      await redeemRecovered(false)
+      let accruedAmount = await linkdropEscrow.accruedFees()
+      expect(accruedAmount).to.equal(depositFee);
+      let ownerBalance = await ethers.provider.getBalance(owner.address)
+      let escrowBalance = await ethers.provider.getBalance(linkdropEscrow.address)
+      
+      await linkdropEscrow.connect(owner).withdrawAccruedFees()
+      expect(await linkdropEscrow.accruedFees()).to.equal(0);
+      expect(await ethers.provider.getBalance(owner.address)).to.be.gt(ownerBalance);
+      expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(escrowBalance - accruedAmount);
     })
     
-    describe("withdraw fees", function () {
-      
-      it("Should withdraw accrued fees", async function () {
-        const { amount, expiration, transferId } = await makeDeposit(false)
-        await redeemRecovered()
-        let accruedAmount = await linkdropEscrow.accruedFees(tokenAddr)
-        expect(accruedAmount).to.equal(depositFee);
-        let ownerBalance = await ethers.provider.getBalance(owner.address)
-        let escrowBalance = await ethers.provider.getBalance(linkdropEscrow.address)
-        
-        await linkdropEscrow.connect(owner).withdrawAccruedFees(tokenAddr)
-        expect(await linkdropEscrow.accruedFees(tokenAddr)).to.equal(0);
-        expect(await ethers.provider.getBalance(owner.address)).to.be.gt(ownerBalance);
-        expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(escrowBalance - accruedAmount);
-      })
-      
-      it("Should not withdraw accrued fees multiple times", async function () {
+    it("Should not withdraw accrued fees multiple times", async function () {
         const { amount, expiration, transferId } = await makeDeposit()              
-        const accruedAmount = await linkdropEscrow.accruedFees(tokenAddr)
+        const accruedAmount = await linkdropEscrow.accruedFees()
         expect(accruedAmount).to.equal(0);
         const ownerBalance = await ethers.provider.getBalance(owner.address)
         const escrowBalance = await ethers.provider.getBalance(linkdropEscrow.address)
-        
-        await linkdropEscrow.connect(owner).withdrawAccruedFees(tokenAddr)
-        expect(await linkdropEscrow.accruedFees(tokenAddr)).to.equal(0);
+      
+        await linkdropEscrow.connect(owner).withdrawAccruedFees()
+        expect(await linkdropEscrow.accruedFees()).to.equal(0);
         expect(await ethers.provider.getBalance(owner.address)).to.be.lt(ownerBalance);
         expect(await ethers.provider.getBalance(linkdropEscrow.address)).to.equal(escrowBalance);      
-      })
-    });    
-  })
+    })
+  });
   
+
   describe("refund", function () {
     
     it("Should fail if the caller is not a relayer", async function () {
@@ -208,31 +195,60 @@ describe("LinkdropEscrowNetworkToken", function () {
       
       // Try to refund funds as another user
       await expect(
-        linkdropEscrow.connect(addrs[0]).refund(sender.address, tokenAddr, transferId)
+        linkdropEscrow.connect(addrs[0]).refund(sender.address, transferId, true)
       ).to.be.revertedWith("LinkdropEscrow: msg.sender is not relayer.");
     });
 
-    it("Should refund ETH to original sender", async function () {
-      
+    it("Should fail if transfer is not expired", async function () {
+        const { amount, expiration, transferId } = await makeDeposit()
+      await expect(
+        linkdropEscrow.connect(relayer).refund(sender.address, transferId, true)
+      ).to.be.revertedWith("LinkdropEscrow: transfer not expired yet.");
+    });
+
+
+    it("Should refund USDC to original sender (non-sponsored)", async function () {
       const { amount, expiration, transferId } = await makeDeposit()
-      const ethBalanceAfterDeposit = await ethers.provider.getBalance(sender.address)
+      const usdcBalanceAfterDeposit = await ethers.provider.getBalance(sender.address)
       
       // wait for 25 hours
       await network.provider.send("evm_increaseTime", [60 * 60 * 25]);  // Increase time by 25 hours
       await network.provider.send("evm_mine");  // Mine the next block
       
       // Refund the deposit
-      await linkdropEscrow.connect(relayer).refund(sender.address, tokenAddr, transferId);
+      await linkdropEscrow.connect(relayer).refund(sender.address, transferId, false);
 
-      // Check that the ETH was refunded and deposit is zero
-      expect(await ethers.provider.getBalance(sender.address)).to.equal(ethBalanceAfterDeposit.add(amount));
-      expect((await linkdropEscrow.getDeposit(tokenAddr, sender.address, transferId)).amount).to.equal(0);
-      expect(await linkdropEscrow.accruedFees(tokenAddr)).to.equal(0);
+      // Check that the USDC was refunded and deposit is zero
+      expect(await ethers.provider.getBalance(sender.address)).to.equal(usdcBalanceAfterDeposit.add(amount.sub(claimFee)));
+      expect((await linkdropEscrow.getDeposit(sender.address, transferId)).amount).to.equal(0);
+      expect(await linkdropEscrow.accruedFees()).to.equal(claimFee);
+
+      // reset back EVM time
+      await network.provider.send("evm_increaseTime", [-60 * 60 * 25]);  // Increase time by 25 hours
+      await network.provider.send("evm_mine");  // Mine the next block      
+    });
+
+    it("Should refund USDC to original sender (sponsored)", async function () {
+
+      
+      const { amount, expiration, transferId } = await makeDeposit()
+      const usdcBalanceAfterDeposit = await ethers.provider.getBalance(sender.address)
+      
+      // wait for 25 hours
+      await network.provider.send("evm_increaseTime", [60 * 60 * 25]);  // Increase time by 25 hours
+      await network.provider.send("evm_mine");  // Mine the next block
+      
+      // Refund the deposit
+      await linkdropEscrow.connect(relayer).refund(sender.address, transferId, true);
+
+      // Check that the USDC was refunded and deposit is zero
+      expect(await ethers.provider.getBalance(sender.address)).to.equal(usdcBalanceAfterDeposit.add(amount));
+      expect((await linkdropEscrow.getDeposit(sender.address, transferId)).amount).to.equal(0);
+      expect(await linkdropEscrow.accruedFees()).to.equal(0);
 
       // reset back EVM time
       await network.provider.send("evm_increaseTime", [-60 * 60 * 25]);  // Increase time by 25 hours
       await network.provider.send("evm_mine");  // Mine the next block            
     });    
   });
-
 });
